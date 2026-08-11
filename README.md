@@ -1,44 +1,76 @@
-# SpinLab firmware
+# SpinLab 韌體
 
-ESP32-C3 firmware for the first SpinLab milestone: capture the Demo machine's
-IR-sensor edges with GPIO interrupts, timestamp them, and derive RPM without
-high-frequency polling. This repository intentionally starts with a serial
-diagnostic baseline before adding data recording, BLE, the web application,
-SP calibration, or IMU analysis.
+以 ESP32-C3 製作的戰鬥陀螺測速器。第一階段透過 GPIO 中斷擷取 IR 感測器 edge、記錄時間差並換算 RPM；目前輸出至序列埠，尚未包含 BLE、資料保存、SP 校正與 IMU。
 
-## Prerequisites
+## 專案結構
 
-- ESP-IDF v5.5.2 (installed under `C:\\Espressif\\v5.5.2`)
-- An ESP32-C3 development board and a USB data cable
+- `main/spinlab_main.c`：IR edge → period → RPM 的韌體入口；預設 IR 輸入為 GPIO 2、每圈 1 pulse。
+- `sdkconfig.defaults`：ESP32-C3 預設建置設定。
+- `go.ps1`：實際執行環境啟用、清理與建置的 PowerShell 腳本。
+- `go.cmd`：讓終端機可用簡短的 `go` 指令呼叫 `go.ps1`。
 
-Open a new PowerShell window, activate ESP-IDF, then build:
+## 開發環境
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-. C:\Espressif\tools\Microsoft.v5.5.2.PowerShell_profile.ps1
-idf.py set-target esp32c3
-idf.py build
-```
+需求：Windows、Git、ESP32-C3 開發板與 USB 資料線。使用 ESP-IDF **v5.5.2**。
 
-With the board connected, replace `COMx` with its actual serial port:
+首次安裝 ESP-IDF Installation Manager：
 
 ```powershell
-idf.py -p COMx flash monitor
+winget install --id Espressif.EIM-CLI --exact
 ```
 
-Exit the monitor with `Ctrl+]`.
+關閉並重新開啟 PowerShell，再安裝 ESP32-C3 工具鏈：
 
-## First hardware validation
+```powershell
+$eim = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Espressif.EIM-CLI_Microsoft.Winget.Source_8wekyb3d8bbwe\eim.exe"
+& $eim install --path 'C:\Espressif' --idf-versions 'v5.5.2' --target 'esp32c3' --non-interactive true --install-all-prerequisites true --cleanup true --do-not-track true --create-bat-activation-script true
+```
 
-1. Confirm the purchased Demo machine produces stable RPM with its original firmware.
-2. Wire its IR sensor output to the configured `SPINLAB_IR_SENSOR_GPIO` in `main/spinlab_main.c` (currently GPIO 2), with a shared ground and appropriate 3.3 V logic level.
-3. Set `SPINLAB_PULSES_PER_REVOLUTION` to match the optical pattern.
-4. Flash this firmware and record the serial `edge`, `period`, and `rpm` logs.
-5. Keep the raw edge timestamps in the next recorder milestone; do not treat this starter's calculated RPM as final calibrated data.
+## 常用指令
 
-## Scope and next milestones
+在 VS Code 或 PowerShell 終端機中，先進入專案根目錄：
 
-1. Replace serial-only output with an in-memory raw pulse ring buffer and shot recorder.
-2. Add launcher Loaded/Release event capture.
-3. Define and implement the custom BLE protocol.
-4. Integrate live and historical analysis with the existing Beyblade web system.
+```powershell
+Set-Location C:\KAI\SpinLab
+```
+
+建議使用 `go` 腳本；它會自動載入 ESP-IDF 環境。
+
+```powershell
+go rebuild  # 刪除 build/，再產生新的 build\spinlab_firmware.bin
+go clean    # 僅刪除 build/
+```
+
+若終端機找不到 `go`，使用：
+
+```powershell
+.\go.ps1 rebuild
+```
+
+燒錄並開啟序列監控（將 `COM5` 改為實際連接埠）：
+
+```powershell
+idf.py -p COM5 flash monitor
+```
+
+若只需重新開啟監控：
+
+```powershell
+idf.py -p COM5 monitor
+```
+
+離開 monitor 使用 `Ctrl+]`，若無效可按 `Ctrl+C`。
+
+## 首次硬體驗證 (目前尚未驗證)
+
+1. 使用@cococat_3d 製作的測速器 Demo 韌體確認感測器和機構可正常測速。
+2. 將 IR 訊號接至 GPIO 2，並與 ESP32-C3 共地；訊號必須是 3.3 V 邏輯。
+3. 依光學圖樣調整 `SPINLAB_PULSES_PER_REVOLUTION`。
+4. 燒錄後等待序列輸出：`IR diagnostic ready on GPIO 2`。
+5. 轉動測試目標後，確認看到 `edge`、`period` 與 `rpm` 紀錄。
+
+## 開發規則
+
+- 不要提交 `build/`、`sdkconfig` 或量測資料；它們已由 `.gitignore` 排除。
+- 保留原始 edge timestamp 是後續濾波、RPM 曲線和 SP 校正的基礎。
+- 在基本測速穩定前，不加入 BLE、IMU 或網站功能。
