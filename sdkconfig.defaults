@@ -1,0 +1,6 @@
+# ESP32-C3 uses the RISC-V toolchain.
+CONFIG_IDF_TARGET="esp32c3"
+
+# Keep diagnostics useful during the raw-edge validation phase.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_FREERTOS_HZ=1000

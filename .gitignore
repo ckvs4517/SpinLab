@@ -1,0 +1,8 @@
+# ESP-IDF build output and local IDE settings
+build/
+.vscode/
+sdkconfig
+sdkconfig.old
+
+# Local captures produced by the serial diagnostic workflow
+captures/
