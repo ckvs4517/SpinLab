@@ -48,6 +48,11 @@
 #define SPINLAB_CHARGE_ACTIVE_LEVEL 0
 #define SPINLAB_CHARGE_CHECK_INTERVAL_US 1000000ULL
 
+/* Demo-machine load sensor: HIGH means a Beyblade is installed. */
+#define SPINLAB_LOAD_SENSOR_GPIO GPIO_NUM_1
+#define SPINLAB_LOAD_ACTIVE_LEVEL 1
+#define SPINLAB_LOAD_DEBOUNCE_US 1000ULL
+
 /* ESP32-C3 SuperMini onboard blue LED: active-low on GPIO8. */
 #define SPINLAB_STATUS_LED_GPIO GPIO_NUM_8
 #define SPINLAB_STATUS_LED_ACTIVE_LEVEL 0
@@ -90,6 +95,31 @@ static portMUX_TYPE s_capture_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool s_charge_state_initialized;
 static bool s_charging;
 static uint64_t s_last_charge_check_us;
+
+static volatile uint8_t s_load_raw_level;
+static volatile uint64_t s_load_last_raw_change_us;
+static volatile bool s_load_change_pending;
+static uint8_t s_load_stable_level;
+static uint64_t s_load_last_stable_change_us;
+static bool s_load_state_initialized;
+static portMUX_TYPE s_load_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void publish_device_status(void)
+{
+    const spinlab_ble_status_t status = {
+        .load_initialized = s_load_state_initialized,
+        .load_installed = s_load_state_initialized &&
+                          s_load_stable_level == SPINLAB_LOAD_ACTIVE_LEVEL,
+        .charging = s_charging,
+        .load_raw_level = s_load_raw_level,
+        .load_stable_level = s_load_stable_level,
+    };
+
+    const esp_err_t err = spinlab_ble_publish_status(&status);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "BLE status publish failed: %s", esp_err_to_name(err));
+    }
+}
 
 static void set_status_led(bool on)
 {
@@ -146,6 +176,19 @@ static void IRAM_ATTR ir_edge_isr(void *arg)
     }
 
     portEXIT_CRITICAL_ISR(&s_capture_mux);
+}
+
+static void IRAM_ATTR load_edge_isr(void *arg)
+{
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    const uint8_t level = (uint8_t)gpio_get_level(SPINLAB_LOAD_SENSOR_GPIO);
+    (void)arg;
+
+    portENTER_CRITICAL_ISR(&s_load_mux);
+    s_load_raw_level = level;
+    s_load_last_raw_change_us = now_us;
+    s_load_change_pending = true;
+    portEXIT_CRITICAL_ISR(&s_load_mux);
 }
 
 static float period_to_rpm(uint64_t period_us)
@@ -680,7 +723,80 @@ static void update_charge_status(void)
         s_charging = charging;
         s_charge_state_initialized = true;
         ESP_LOGI(TAG, "charge status: %s", charging ? "charging" : "not charging");
+        publish_device_status();
     }
+}
+
+static void initialize_load_status(void)
+{
+    const uint8_t level = (uint8_t)gpio_get_level(SPINLAB_LOAD_SENSOR_GPIO);
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+
+    portENTER_CRITICAL(&s_load_mux);
+    s_load_raw_level = level;
+    s_load_last_raw_change_us = now_us;
+    s_load_change_pending = false;
+    portEXIT_CRITICAL(&s_load_mux);
+
+    s_load_stable_level = level;
+    s_load_last_stable_change_us = now_us;
+    s_load_state_initialized = true;
+
+    ESP_LOGI(TAG,
+             "load sensor ready: GPIO %d, raw=%u stable=%u installed=%s",
+             SPINLAB_LOAD_SENSOR_GPIO,
+             level,
+             level,
+             level == SPINLAB_LOAD_ACTIVE_LEVEL ? "yes" : "no");
+}
+
+static void update_load_status(void)
+{
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    uint8_t raw_level;
+    uint64_t raw_change_us;
+    bool pending;
+
+    portENTER_CRITICAL(&s_load_mux);
+    raw_level = s_load_raw_level;
+    raw_change_us = s_load_last_raw_change_us;
+    pending = s_load_change_pending;
+    portEXIT_CRITICAL(&s_load_mux);
+
+    if (!pending || now_us - raw_change_us < SPINLAB_LOAD_DEBOUNCE_US) {
+        return;
+    }
+
+    if ((uint8_t)gpio_get_level(SPINLAB_LOAD_SENSOR_GPIO) != raw_level) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_load_mux);
+    if (s_load_last_raw_change_us != raw_change_us ||
+        s_load_raw_level != raw_level) {
+        portEXIT_CRITICAL(&s_load_mux);
+        return;
+    }
+    s_load_change_pending = false;
+    portEXIT_CRITICAL(&s_load_mux);
+
+    if (raw_level == s_load_stable_level) {
+        return;
+    }
+
+    const uint8_t old_level = s_load_stable_level;
+    s_load_stable_level = raw_level;
+    s_load_last_stable_change_us = raw_change_us;
+
+    ESP_LOGI(TAG,
+             "load stable change: timestamp_us=%" PRIu64
+             " old=%u new=%u installed=%s debounce_us=%u",
+             s_load_last_stable_change_us,
+             old_level,
+             s_load_stable_level,
+             s_load_stable_level == SPINLAB_LOAD_ACTIVE_LEVEL ? "yes" : "no",
+             (unsigned)SPINLAB_LOAD_DEBOUNCE_US);
+    publish_device_status();
 }
 
 void app_main(void)
@@ -699,6 +815,13 @@ void app_main(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
+    const gpio_config_t load_config = {
+        .pin_bit_mask = 1ULL << SPINLAB_LOAD_SENSOR_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE,
+    };
     const gpio_config_t led_config = {
         .pin_bit_mask = 1ULL << SPINLAB_STATUS_LED_GPIO,
         .mode = GPIO_MODE_OUTPUT,
@@ -709,11 +832,17 @@ void app_main(void)
 
     ESP_ERROR_CHECK(gpio_config(&input_config));
     ESP_ERROR_CHECK(gpio_config(&charge_config));
+    ESP_ERROR_CHECK(gpio_config(&load_config));
     ESP_ERROR_CHECK(gpio_config(&led_config));
     set_status_led(false);
     ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM));
     ESP_ERROR_CHECK(gpio_isr_handler_add(SPINLAB_IR_SENSOR_GPIO, ir_edge_isr, NULL));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(SPINLAB_LOAD_SENSOR_GPIO,
+                                         load_edge_isr,
+                                         NULL));
+    initialize_load_status();
     ESP_ERROR_CHECK(spinlab_ble_init());
+    publish_device_status();
 
     ESP_LOGI(TAG,
              "raw capture ready: GPIO %d, pull-up, mode=%s, edges_per_rev=%u, "
@@ -725,6 +854,7 @@ void app_main(void)
              (unsigned)(SPINLAB_CAPTURE_IDLE_TIMEOUT_US / 1000ULL));
 
     while (true) {
+        update_load_status();
         process_capture();
         update_charge_status();
         update_status_led();
