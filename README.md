@@ -4,7 +4,7 @@
 
 ## 專案結構
 
-- `main/spinlab_main.c`：Raw Edge Capture 韌體入口；依 Demo 機設定使用 GPIO0 與內部上拉，可切換下降緣或雙邊緣擷取。
+- `main/spinlab_main.c`：Raw Edge Capture 韌體入口；GPIO0 擷取轉速 pulse，GPIO1 診斷陀螺安裝／釋放狀態。
 - `main/spinlab_ble.c`／`spinlab_ble.h`：NimBLE Peripheral、GATT Service 與射擊結果通知協定。
 - `sdkconfig.defaults`：ESP32-C3 預設建置設定。
 - `go.ps1`：執行 ESP-IDF 環境啟用、清理與建置。
@@ -82,6 +82,22 @@ idf.py -p COM6 monitor
 3. 依測試階段設定 `SPINLAB_CAPTURE_BOTH_EDGES`；雙邊緣診斷為 `1`，穩定的下降緣基準為 `0`。
 4. 燒錄後等待序列輸出：`raw capture ready: GPIO 0`。
 5. 完成一次 Launcher 動作並停止；最後一個 edge 後約 2 秒會輸出完整 `RAW` 資料與摘要。
+
+## 陀螺安裝 Sensor 診斷
+
+依 Demo 韌體設定，第二顆 IR Sensor 使用 GPIO1、內部上拉，HIGH 表示已安裝陀螺。GPIO1 採雙邊緣中斷保存原始變化 timestamp，電位持續穩定至少 1 ms 後才更新正式狀態，ISR 不執行 printf。
+
+開機與穩定狀態改變時會輸出：
+
+```text
+I (...) spinlab: load sensor ready: GPIO 1, raw=0 stable=0 installed=no
+I (...) spinlab: load stable change: timestamp_us=12345678 old=0 new=1 installed=yes debounce_us=1000
+```
+
+- `LOW → HIGH`：預期為裝上陀螺。
+- `HIGH → LOW`：預期為陀螺釋放。
+- 網站連線後會透過 BLE 即時顯示 GPIO1 的 stable level 與安裝狀態。
+- 此階段只用來確認 Sensor 與有效電位；Shot segmentation 仍使用既有 reversal-gap 演算法，避免在實機驗證前改變 SP 結果。
 
 ## Sensor 穩定度測試
 
@@ -175,7 +191,8 @@ ESP32-C3 SuperMini 的內建藍燈位於 GPIO8，為 LOW 時亮。紅燈是直�
 
 - Service UUID：`8f4e1000-9c3a-4f2b-a7d1-6b5c2e91a001`
 - Result Characteristic UUID：`8f4e1000-9c3a-4f2b-a7d1-6b5c2e91a002`
-- Characteristic properties：Read、Notify
+- Status Characteristic UUID：`8f4e1000-9c3a-4f2b-a7d1-6b5c2e91a003`
+- 兩個 Characteristic properties：Read、Notify
 - Byte order：little-endian
 
 ### Result Packet v1
@@ -196,6 +213,17 @@ ESP32-C3 SuperMini 的內建藍燈位於 GPIO8，為 LOW 時亮。紅燈是直�
 | 18 | `uint16` | pull_peak_rpm | 診斷 RPM，四捨五入為整數 |
 
 此封包可在 BLE 預設 ATT MTU 下完整通知，不需要分段重組。`pull_to_first_rewind` 可由 `pull_active_time + reversal_gap` 算出，transition rate 可由 `N / pull_active_time` 算出。
+
+### Status Packet v1
+
+Status Characteristic 會保存最新狀態，GPIO1 stable state 或充電狀態改變時送出 4-byte Notify。App 訂閱後也可先 Read 取得初始值。
+
+| Offset | Type | Field | 說明 |
+|---:|---|---|---|
+| 0 | `uint8` | version | 固定為 `1` |
+| 1 | `uint8` | flags | bit 0 已安裝、bit 1 充電中、bit 2 Load Sensor 已初始化 |
+| 2 | `uint8` | load_raw_level | GPIO1 最新原始電位 |
+| 3 | `uint8` | load_stable_level | 經 1 ms debounce 的 GPIO1 穩定電位 |
 
 目前是 SpinLab 自有協定，不相容官方 Battle Pass App；第一版未啟用 pairing／加密，也不透過 BLE 傳送完整 Raw edges。USB 序列 Raw 與 CSV 仍保留供韌體診斷，後續 App 穩定後再設計 Raw 分段傳輸與連線安全。
 

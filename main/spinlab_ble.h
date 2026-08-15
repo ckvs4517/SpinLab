@@ -27,6 +27,15 @@ typedef struct {
     float pull_peak_rpm;
 } spinlab_ble_shot_t;
 
+typedef struct {
+    bool load_initialized;
+    bool load_installed;
+    bool charging;
+    uint8_t load_raw_level;
+    uint8_t load_stable_level;
+} spinlab_ble_status_t;
+
 esp_err_t spinlab_ble_init(void);
 esp_err_t spinlab_ble_publish_shot(const spinlab_ble_shot_t *shot);
+esp_err_t spinlab_ble_publish_status(const spinlab_ble_status_t *status);
 bool spinlab_ble_is_connected(void);
