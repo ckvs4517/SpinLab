@@ -38,6 +38,9 @@ static const ble_uuid128_t s_result_uuid =
 static const ble_uuid128_t s_status_uuid =
     BLE_UUID128_INIT(0x03, 0xa0, 0x91, 0x2e, 0x5c, 0x6b, 0xd1, 0xa7,
                      0x2b, 0x4f, 0x3a, 0x9c, 0x00, 0x10, 0x4e, 0x8f);
+static const ble_uuid128_t s_raw_uuid =
+    BLE_UUID128_INIT(0x04, 0xa0, 0x91, 0x2e, 0x5c, 0x6b, 0xd1, 0xa7,
+                     0x2b, 0x4f, 0x3a, 0x9c, 0x00, 0x10, 0x4e, 0x8f);
 
 typedef struct __attribute__((packed)) {
     uint8_t version;
@@ -71,9 +74,11 @@ static const char *TAG = "spinlab_ble";
 static uint8_t s_own_addr_type;
 static uint16_t s_result_value_handle;
 static uint16_t s_status_value_handle;
+static uint16_t s_raw_value_handle;
 static uint16_t s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool s_result_notify_enabled;
 static bool s_status_notify_enabled;
+static bool s_raw_notify_enabled;
 static uint16_t s_next_shot_id = 1;
 static spinlab_ble_result_packet_t s_latest_packet = {
     .version = SPINLAB_BLE_PROTOCOL_VERSION,
@@ -154,6 +159,13 @@ static int status_access(uint16_t conn_handle,
                : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static int raw_access(uint16_t conn_handle, uint16_t attr_handle,
+                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle; (void)attr_handle; (void)ctxt; (void)arg;
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static const struct ble_gatt_svc_def s_gatt_services[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -172,6 +184,12 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
                     .val_handle = &s_status_value_handle,
                     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 },
+                {
+                    .uuid = &s_raw_uuid.u,
+                    .access_cb = raw_access,
+                    .val_handle = &s_raw_value_handle,
+                    .flags = BLE_GATT_CHR_F_NOTIFY,
+                },
                 {0},
             },
     },
@@ -189,6 +207,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_connection_handle = event->connect.conn_handle;
             s_result_notify_enabled = false;
             s_status_notify_enabled = false;
+            s_raw_notify_enabled = false;
             portEXIT_CRITICAL(&s_ble_mux);
             ESP_LOGI(TAG, "app connected; handle=%u",
                      (unsigned)event->connect.conn_handle);
@@ -204,6 +223,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
         s_result_notify_enabled = false;
         s_status_notify_enabled = false;
+        s_raw_notify_enabled = false;
         portEXIT_CRITICAL(&s_ble_mux);
         ESP_LOGI(TAG, "app disconnected; reason=%d",
                  event->disconnect.reason);
@@ -223,6 +243,10 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             portEXIT_CRITICAL(&s_ble_mux);
             ESP_LOGI(TAG, "status notifications: %s",
                      event->subscribe.cur_notify ? "enabled" : "disabled");
+        } else if (event->subscribe.attr_handle == s_raw_value_handle) {
+            portENTER_CRITICAL(&s_ble_mux);
+            s_raw_notify_enabled = event->subscribe.cur_notify != 0;
+            portEXIT_CRITICAL(&s_ble_mux);
         }
         return 0;
 
@@ -343,7 +367,7 @@ esp_err_t spinlab_ble_init(void)
     return ESP_OK;
 }
 
-esp_err_t spinlab_ble_publish_shot(const spinlab_ble_shot_t *shot)
+esp_err_t spinlab_ble_publish_shot(const spinlab_ble_shot_t *shot, uint16_t *shot_id_out)
 {
     if (shot == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -379,6 +403,7 @@ esp_err_t spinlab_ble_publish_shot(const spinlab_ble_shot_t *shot)
     conn_handle = s_connection_handle;
     notify_enabled = s_result_notify_enabled;
     portEXIT_CRITICAL(&s_ble_mux);
+    if (shot_id_out) *shot_id_out = packet.shot_id;
 
     if (conn_handle == BLE_HS_CONN_HANDLE_NONE || !notify_enabled) {
         ESP_LOGI(TAG, "shot %u stored; no subscribed app",
@@ -447,6 +472,40 @@ esp_err_t spinlab_ble_publish_status(const spinlab_ble_status_t *status)
 
     return ESP_OK;
 }
+
+esp_err_t spinlab_ble_publish_raw_profile(uint16_t shot_id, const spinlab_ble_raw_edge_t *edges, uint16_t count)
+{
+    if (!edges || count == 0) return ESP_ERR_INVALID_ARG;
+    uint16_t conn; bool enabled;
+    portENTER_CRITICAL(&s_ble_mux); conn = s_connection_handle; enabled = s_raw_notify_enabled; portEXIT_CRITICAL(&s_ble_mux);
+    if (conn == BLE_HS_CONN_HANDLE_NONE || !enabled) {
+        ESP_LOGI(TAG, "raw profile skipped; app not subscribed");
+        return ESP_OK;
+    }
+    const uint8_t per_chunk = 2;
+    const uint8_t total = (uint8_t)((count + per_chunk - 1) / per_chunk);
+    ESP_LOGI(TAG, "raw profile sending; shot=%u edges=%u chunks=%u", (unsigned)shot_id, (unsigned)count, (unsigned)total);
+    for (uint8_t chunk = 0; chunk < total; ++chunk) {
+        uint8_t packet[20] = {1, 1};
+        uint16_t start = (uint16_t)chunk * per_chunk;
+        uint8_t n = (count - start > per_chunk) ? per_chunk : (uint8_t)(count - start);
+        memcpy(packet + 2, &shot_id, 2); packet[4] = chunk; packet[5] = total;
+        memcpy(packet + 6, &start, 2); packet[8] = n;
+        uint32_t base = (uint32_t)edges[0].timestamp_us; memcpy(packet + 9, &base, 4);
+        for (uint8_t i = 0; i < n; ++i) {
+            uint16_t delta = edges[start + i].delta_us > UINT16_MAX ? UINT16_MAX : (uint16_t)edges[start + i].delta_us;
+            memcpy(packet + 13 + i * 3, &delta, 2); packet[15 + i * 3] = edges[start + i].flags;
+        }
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(packet, sizeof(packet));
+        if (!om || ble_gatts_notify_custom(conn, s_raw_value_handle, om) != 0) {
+            ESP_LOGW(TAG, "raw profile chunk failed; shot=%u chunk=%u/%u", (unsigned)shot_id, (unsigned)(chunk + 1), (unsigned)total);
+            return ESP_FAIL;
+        }
+    }
+    ESP_LOGI(TAG, "raw profile sent; shot=%u edges=%u chunks=%u", (unsigned)shot_id, (unsigned)count, (unsigned)total);
+    return ESP_OK;
+}
+
 
 bool spinlab_ble_is_connected(void)
 {

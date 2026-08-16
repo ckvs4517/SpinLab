@@ -86,6 +86,7 @@ static const char *TAG = "spinlab";
 
 static uint64_t s_edge_timestamps_us[SPINLAB_CAPTURE_CAPACITY];
 static uint8_t s_edge_levels[SPINLAB_CAPTURE_CAPACITY];
+static spinlab_ble_raw_edge_t s_ble_raw_edges[SPINLAB_CAPTURE_CAPACITY];
 static volatile uint32_t s_capture_count;
 static volatile uint64_t s_last_edge_us;
 static volatile bool s_capture_overflow;
@@ -640,11 +641,19 @@ static void dump_raw_capture(uint32_t count, bool overflow)
         .reference_sp_high = reference_sp_high,
         .pull_peak_rpm = pull_peak_rpm,
     };
-    const esp_err_t ble_result = spinlab_ble_publish_shot(&ble_shot);
+    uint16_t ble_shot_id = 0;
+    const esp_err_t ble_result = spinlab_ble_publish_shot(&ble_shot, &ble_shot_id);
     if (ble_result != ESP_OK) {
         ESP_LOGW(TAG, "BLE shot publish failed: %s",
                  esp_err_to_name(ble_result));
     }
+    const uint16_t raw_count = count > UINT16_MAX ? UINT16_MAX : (uint16_t)count;
+    for (uint16_t i = 0; i < raw_count; ++i) {
+        s_ble_raw_edges[i].timestamp_us = s_edge_timestamps_us[i];
+        s_ble_raw_edges[i].delta_us = i == 0 ? 0U : (uint32_t)(s_edge_timestamps_us[i] - s_edge_timestamps_us[i - 1U]);
+        s_ble_raw_edges[i].flags = (uint8_t)(s_edge_levels[i] & 1U);
+    }
+    spinlab_ble_publish_raw_profile(ble_shot_id, s_ble_raw_edges, raw_count);
 
     const uint64_t duration_us =
         (count > 1U) ? s_edge_timestamps_us[count - 1U] - s_edge_timestamps_us[0] : 0;

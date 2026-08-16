@@ -34,8 +34,10 @@ typedef struct {
     uint8_t load_raw_level;
     uint8_t load_stable_level;
 } spinlab_ble_status_t;
+typedef struct { uint64_t timestamp_us; uint32_t delta_us; uint8_t flags; } spinlab_ble_raw_edge_t;
 
 esp_err_t spinlab_ble_init(void);
-esp_err_t spinlab_ble_publish_shot(const spinlab_ble_shot_t *shot);
+esp_err_t spinlab_ble_publish_shot(const spinlab_ble_shot_t *shot, uint16_t *shot_id_out);
+esp_err_t spinlab_ble_publish_raw_profile(uint16_t shot_id, const spinlab_ble_raw_edge_t *edges, uint16_t count);
 esp_err_t spinlab_ble_publish_status(const spinlab_ble_status_t *status);
 bool spinlab_ble_is_connected(void);
