@@ -1,0 +1,3 @@
+BRD_1.6mm_battery_relocated_V5_base_only.zip : 嘗試把電池槽更換位置，但會擋到開關
+
+BRD_1.6mm_battery_relocated_V6_base_only.zip: 電池槽跟主板槽拉開距離但檔板太厚還是卡到開關
